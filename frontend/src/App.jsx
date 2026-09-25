@@ -27,45 +27,75 @@ function App() {
   };
 
   const analyzeMammogram = async () => {
-    if (!file) {
-      setError("Please upload a mammogram image first.");
-      return;
+  if (!file) {
+    setError("Please upload a mammogram image first.");
+    return;
+  }
+
+  setLoading(true);
+  setError("");
+  setResult(null);
+
+  try {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    console.log("Sending request to:", API_URL);
+
+    const response = await fetch(API_URL, {
+      method: "POST",
+      body: formData,
+    });
+
+    console.log("Backend status:", response.status);
+
+    // Read the response as text first
+    const responseText = await response.text();
+
+    console.log("Backend response:", responseText);
+
+    if (!response.ok) {
+      throw new Error(
+        `Backend returned ${response.status}: ${responseText}`
+      );
     }
 
-    setLoading(true);
-    setError("");
-    setResult(null);
+    let data;
 
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-
-      const response = await fetch(API_URL, {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!response.ok) {
-        throw new Error(`Backend returned ${response.status}`);
-      }
-
-      const data = await response.json();
-
-      if (!data.success) {
-        throw new Error(data.error || "Prediction failed.");
-      }
-
-      setResult(data);
-    } catch (err) {
-      console.error(err);
-
-      setError(
-        "Unable to connect to the AI backend. Make sure the QuantamDX FastAPI server is running on port 8001."
-      );
-    } finally {
-      setLoading(false);
+      data = JSON.parse(responseText);
+    } catch {
+      throw new Error("Backend returned an invalid JSON response.");
     }
-  };
+
+    console.log("Parsed prediction data:", data);
+
+    if (!data.success) {
+      throw new Error(data.error || "Prediction failed.");
+    }
+
+    // Basic validation of the expected response
+    if (!data.models || !data.hybrid_result) {
+      throw new Error(
+        "Backend response is missing model prediction data."
+      );
+    }
+
+    setResult(data);
+
+  } catch (err) {
+    console.error("Prediction error:", err);
+
+    setError(
+      err?.message ||
+      "Unable to connect to the AI backend."
+    );
+
+  } finally {
+    console.log("Analysis finished.");
+    setLoading(false);
+  }
+};
 
   const clearAnalysis = () => {
     setFile(null);
