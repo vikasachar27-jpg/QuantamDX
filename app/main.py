@@ -26,19 +26,29 @@ from torchvision.models import (
 # CONFIG
 # ============================================================
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODEL_DIR = os.path.join(BASE_DIR, "app", "models")
+BASE_DIR = os.path.dirname(
+    os.path.dirname(
+        os.path.abspath(__file__)
+    )
+)
+
+MODEL_DIR = os.path.join(
+    BASE_DIR,
+    "app",
+    "models"
+)
 
 device = torch.device(
     "cuda" if torch.cuda.is_available() else "cpu"
 )
 
-# ------------------------------------------------------------
-# IMPORTANT FOR LOW-MEMORY CPU SERVERS
-# ------------------------------------------------------------
-# Limit PyTorch CPU thread usage.
-# This reduces memory usage caused by large thread pools.
+
+# ============================================================
+# LOW MEMORY CPU SETTINGS
+# ============================================================
+
 if device.type == "cpu":
+
     torch.set_num_threads(1)
 
     try:
@@ -62,15 +72,7 @@ prediction_jobs = {}
 
 prediction_lock = threading.Lock()
 
-# ------------------------------------------------------------
-# IMPORTANT:
-# Only one model inference pipeline should run at a time.
-#
-# Railway can receive multiple requests at the same time.
-# Running three large CNNs + the VQC simultaneously can
-# increase memory usage significantly.
-# ------------------------------------------------------------
-
+# Only one complete inference pipeline at a time.
 inference_lock = threading.Lock()
 
 
@@ -91,9 +93,13 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
+
     allow_origins=["*"],
+
     allow_credentials=False,
+
     allow_methods=["*"],
+
     allow_headers=["*"],
 )
 
@@ -103,279 +109,383 @@ app.add_middleware(
 # ============================================================
 
 transform = transforms.Compose([
-    transforms.Resize((300, 300)),
-    transforms.Grayscale(num_output_channels=3),
+
+    transforms.Resize(
+        (300, 300)
+    ),
+
+    transforms.Grayscale(
+        num_output_channels=3
+    ),
+
     transforms.ToTensor(),
+
     transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
+        mean=[
+            0.485,
+            0.456,
+            0.406
+        ],
+
+        std=[
+            0.229,
+            0.224,
+            0.225
+        ]
     )
 ])
 
 
 # ============================================================
-# EFFICIENTNET-B0
+# METRICS
 # ============================================================
 
-print("\n" + "=" * 70)
-print("LOADING EFFICIENTNET-B0")
-print("=" * 70)
+B0_VAL_AUC = 0.7276268559308208
 
-b0 = efficientnet_b0(weights=None)
-
-b0.classifier = nn.Sequential(
-    nn.Dropout(p=0.3),
-    nn.Linear(1280, 2)
-)
-
-b0_checkpoint = torch.load(
-    os.path.join(
-        MODEL_DIR,
-        "efficientnet_b0_best.pth"
-    ),
-    map_location=device,
-    weights_only=False
-)
-
-# Store validation AUC separately before deleting checkpoint.
-B0_VAL_AUC = b0_checkpoint.get("val_auc")
-
-if "model_state_dict" in b0_checkpoint:
-
-    b0.load_state_dict(
-        b0_checkpoint["model_state_dict"],
-        strict=True
-    )
-
-else:
-
-    b0.load_state_dict(
-        b0_checkpoint,
-        strict=True
-    )
-
-
-# IMPORTANT:
-# The checkpoint dictionary can contain another copy of the
-# model parameters. Delete it after loading to reduce RAM.
-
-del b0_checkpoint
-gc.collect()
-
-
-b0 = b0.to(device)
-b0.eval()
-
-print("EfficientNet-B0 loaded successfully.")
-print("Validation AUC:", B0_VAL_AUC)
+RESNET_VAL_AUC = 0.7254650024473814
 
 
 # ============================================================
-# RESNET-50
+# MEMORY CLEANUP
 # ============================================================
 
-print("\n" + "=" * 70)
-print("LOADING RESNET-50")
-print("=" * 70)
+def cleanup_memory():
 
-resnet = resnet50(weights=None)
+    gc.collect()
 
-resnet.fc = nn.Sequential(
-    nn.Dropout(p=0.3),
-    nn.Linear(2048, 2)
-)
+    if device.type == "cuda":
 
-resnet_checkpoint = torch.load(
-    os.path.join(
-        MODEL_DIR,
-        "resnet50_best.pth"
-    ),
-    map_location=device,
-    weights_only=False
-)
-
-# Store validation AUC before deleting checkpoint.
-RESNET_VAL_AUC = resnet_checkpoint.get("val_auc")
-
-if "model_state_dict" in resnet_checkpoint:
-
-    resnet.load_state_dict(
-        resnet_checkpoint["model_state_dict"],
-        strict=True
-    )
-
-else:
-
-    resnet.load_state_dict(
-        resnet_checkpoint,
-        strict=True
-    )
-
-
-# IMPORTANT:
-# Release duplicate checkpoint tensors.
-
-del resnet_checkpoint
-gc.collect()
-
-
-resnet = resnet.to(device)
-resnet.eval()
-
-print("ResNet-50 loaded successfully.")
-print("Validation AUC:", RESNET_VAL_AUC)
+        torch.cuda.empty_cache()
 
 
 # ============================================================
-# EFFICIENTNET-B3
+# LOAD EFFICIENTNET-B0
 # ============================================================
 
-print("\n" + "=" * 70)
-print("LOADING EFFICIENTNET-B3")
-print("=" * 70)
+def load_b0():
 
-b3 = efficientnet_b3(weights=None)
+    print("Loading EfficientNet-B0...")
 
-b3.classifier = nn.Sequential(
-    nn.Dropout(p=0.3),
-    nn.Linear(1536, 2)
-)
-
-b3_checkpoint = torch.load(
-    os.path.join(
-        MODEL_DIR,
-        "efficientnet_b3_backbone.pth"
-    ),
-    map_location=device,
-    weights_only=False
-)
-
-if "model_state_dict" in b3_checkpoint:
-
-    b3.load_state_dict(
-        b3_checkpoint["model_state_dict"],
-        strict=True
+    model = efficientnet_b0(
+        weights=None
     )
 
-else:
+    model.classifier = nn.Sequential(
 
-    b3.load_state_dict(
-        b3_checkpoint,
-        strict=True
+        nn.Dropout(
+            p=0.3
+        ),
+
+        nn.Linear(
+            1280,
+            2
+        )
     )
 
 
-# Remove classifier because B3 is used as feature extractor.
+    checkpoint = torch.load(
 
-b3.classifier = nn.Identity()
+        os.path.join(
+            MODEL_DIR,
+            "efficientnet_b0_best.pth"
+        ),
 
+        map_location=device,
 
-# Release checkpoint copy.
-
-del b3_checkpoint
-gc.collect()
-
-
-b3 = b3.to(device)
-b3.eval()
-
-print("EfficientNet-B3 backbone loaded successfully.")
-
-
-# ============================================================
-# SCALER
-# ============================================================
-
-print("\n" + "=" * 70)
-print("LOADING CNN FEATURE SCALER")
-print("=" * 70)
-
-scaler = joblib.load(
-    os.path.join(
-        MODEL_DIR,
-        "cnn_feature_scaler.pkl"
-    )
-)
-
-print("CNN feature scaler loaded successfully.")
-
-
-# ============================================================
-# SUPERVISED PROJECTION
-#
-# 1536 → 128 → 32 → 8
-# ============================================================
-
-print("\n" + "=" * 70)
-print("LOADING 8D SUPERVISED PROJECTION")
-print("=" * 70)
-
-
-projection = nn.Sequential(
-
-    nn.Linear(1536, 128),
-
-    nn.BatchNorm1d(128),
-
-    nn.ReLU(),
-
-    nn.Dropout(0.2),
-
-    nn.Linear(128, 32),
-
-    nn.BatchNorm1d(32),
-
-    nn.ReLU(),
-
-    nn.Linear(32, 8)
-)
-
-
-projection_checkpoint = torch.load(
-    os.path.join(
-        MODEL_DIR,
-        "supervised_projection_8d_NEW.pth"
-    ),
-    map_location=device,
-    weights_only=False
-)
-
-
-if "model_state_dict" in projection_checkpoint:
-
-    projection.load_state_dict(
-        projection_checkpoint["model_state_dict"],
-        strict=True
-    )
-
-else:
-
-    projection.load_state_dict(
-        projection_checkpoint,
-        strict=True
+        weights_only=False
     )
 
 
-# Release checkpoint copy.
+    if "model_state_dict" in checkpoint:
 
-del projection_checkpoint
-gc.collect()
+        model.load_state_dict(
+            checkpoint["model_state_dict"],
+            strict=True
+        )
+
+    else:
+
+        model.load_state_dict(
+            checkpoint,
+            strict=True
+        )
 
 
-projection = projection.to(device)
-projection.eval()
+    del checkpoint
 
-print("8D supervised projection loaded successfully.")
+    model = model.to(device)
+
+    model.eval()
+
+    cleanup_memory()
+
+    print(
+        "EfficientNet-B0 loaded successfully."
+    )
+
+    return model
+
+
+# ============================================================
+# LOAD RESNET-50
+# ============================================================
+
+def load_resnet():
+
+    print("Loading ResNet-50...")
+
+    model = resnet50(
+        weights=None
+    )
+
+    model.fc = nn.Sequential(
+
+        nn.Dropout(
+            p=0.3
+        ),
+
+        nn.Linear(
+            2048,
+            2
+        )
+    )
+
+
+    checkpoint = torch.load(
+
+        os.path.join(
+            MODEL_DIR,
+            "resnet50_best.pth"
+        ),
+
+        map_location=device,
+
+        weights_only=False
+    )
+
+
+    if "model_state_dict" in checkpoint:
+
+        model.load_state_dict(
+            checkpoint["model_state_dict"],
+            strict=True
+        )
+
+    else:
+
+        model.load_state_dict(
+            checkpoint,
+            strict=True
+        )
+
+
+    del checkpoint
+
+    model = model.to(device)
+
+    model.eval()
+
+    cleanup_memory()
+
+    print(
+        "ResNet-50 loaded successfully."
+    )
+
+    return model
+
+
+# ============================================================
+# LOAD EFFICIENTNET-B3 BACKBONE
+# ============================================================
+
+def load_b3():
+
+    print(
+        "Loading EfficientNet-B3 backbone..."
+    )
+
+    model = efficientnet_b3(
+        weights=None
+    )
+
+    model.classifier = nn.Sequential(
+
+        nn.Dropout(
+            p=0.3
+        ),
+
+        nn.Linear(
+            1536,
+            2
+        )
+    )
+
+
+    checkpoint = torch.load(
+
+        os.path.join(
+            MODEL_DIR,
+            "efficientnet_b3_backbone.pth"
+        ),
+
+        map_location=device,
+
+        weights_only=False
+    )
+
+
+    if "model_state_dict" in checkpoint:
+
+        model.load_state_dict(
+            checkpoint["model_state_dict"],
+            strict=True
+        )
+
+    else:
+
+        model.load_state_dict(
+            checkpoint,
+            strict=True
+        )
+
+
+    del checkpoint
+
+
+    # B3 is used only as feature extractor.
+
+    model.classifier = nn.Identity()
+
+    model = model.to(device)
+
+    model.eval()
+
+    cleanup_memory()
+
+    print(
+        "EfficientNet-B3 backbone loaded successfully."
+    )
+
+    return model
+
+
+# ============================================================
+# LOAD SCALER
+# ============================================================
+
+def load_scaler():
+
+    print(
+        "Loading CNN feature scaler..."
+    )
+
+    scaler = joblib.load(
+
+        os.path.join(
+            MODEL_DIR,
+            "cnn_feature_scaler.pkl"
+        )
+    )
+
+    print(
+        "CNN feature scaler loaded successfully."
+    )
+
+    return scaler
+
+
+# ============================================================
+# LOAD 8D SUPERVISED PROJECTION
+# ============================================================
+
+def load_projection():
+
+    print(
+        "Loading 8D supervised projection..."
+    )
+
+
+    projection = nn.Sequential(
+
+        nn.Linear(
+            1536,
+            128
+        ),
+
+        nn.BatchNorm1d(
+            128
+        ),
+
+        nn.ReLU(),
+
+        nn.Dropout(
+            0.2
+        ),
+
+        nn.Linear(
+            128,
+            32
+        ),
+
+        nn.BatchNorm1d(
+            32
+        ),
+
+        nn.ReLU(),
+
+        nn.Linear(
+            32,
+            8
+        )
+    )
+
+
+    checkpoint = torch.load(
+
+        os.path.join(
+            MODEL_DIR,
+            "supervised_projection_8d_NEW.pth"
+        ),
+
+        map_location=device,
+
+        weights_only=False
+    )
+
+
+    if "model_state_dict" in checkpoint:
+
+        projection.load_state_dict(
+            checkpoint["model_state_dict"],
+            strict=True
+        )
+
+    else:
+
+        projection.load_state_dict(
+            checkpoint,
+            strict=True
+        )
+
+
+    del checkpoint
+
+    projection = projection.to(device)
+
+    projection.eval()
+
+    cleanup_memory()
+
+    print(
+        "8D supervised projection loaded successfully."
+    )
+
+    return projection
 
 
 # ============================================================
 # SAFE VQC
 # ============================================================
-
-print("\n" + "=" * 70)
-print("INITIALIZING 8-QUBIT VQC")
-print("=" * 70)
-
 
 class SafeVQC(nn.Module):
 
@@ -388,15 +498,24 @@ class SafeVQC(nn.Module):
         super().__init__()
 
         self.n_qubits = n_qubits
+
         self.n_layers = n_layers
 
+
         self.q_weights = nn.Parameter(
+
             torch.randn(
+
                 n_layers,
+
                 n_qubits,
+
                 2
+
             ) * 0.05
+
         )
+
 
         self.classifier = nn.Sequential(
 
@@ -415,101 +534,179 @@ class SafeVQC(nn.Module):
 
 
     # ========================================================
-    # RY GATE
+    # RY
     # ========================================================
 
-    def ry(self, theta):
+    def ry(
+        self,
+        theta
+    ):
 
-        c = torch.cos(theta / 2)
-        s = torch.sin(theta / 2)
+        c = torch.cos(
+            theta / 2
+        )
+
+        s = torch.sin(
+            theta / 2
+        )
+
 
         return torch.stack(
-            [
-                torch.stack(
-                    [c, -s],
-                    dim=-1
-                ),
 
-                torch.stack(
-                    [s, c],
-                    dim=-1
-                )
-            ],
-            dim=-2
-        ).to(torch.complex64)
-
-
-    # ========================================================
-    # RZ GATE
-    # ========================================================
-
-    def rz(self, theta):
-
-        c = torch.cos(theta / 2)
-        s = torch.sin(theta / 2)
-
-        zero = torch.zeros_like(c)
-
-        return torch.stack(
             [
 
                 torch.stack(
                     [
-                        torch.complex(c, -s),
-                        zero
+                        c,
+                        -s
                     ],
+
                     dim=-1
                 ),
 
                 torch.stack(
                     [
-                        zero,
-                        torch.complex(c, s)
+                        s,
+                        c
                     ],
+
                     dim=-1
                 )
 
             ],
+
             dim=-2
+
+        ).to(
+            torch.complex64
         )
 
 
     # ========================================================
-    # SINGLE-QUBIT OPERATION
+    # RZ
+    # ========================================================
+
+    def rz(
+        self,
+        theta
+    ):
+
+        c = torch.cos(
+            theta / 2
+        )
+
+        s = torch.sin(
+            theta / 2
+        )
+
+        zero = torch.zeros_like(
+            c
+        )
+
+
+        return torch.stack(
+
+            [
+
+                torch.stack(
+
+                    [
+                        torch.complex(
+                            c,
+                            -s
+                        ),
+
+                        zero
+                    ],
+
+                    dim=-1
+                ),
+
+                torch.stack(
+
+                    [
+                        zero,
+
+                        torch.complex(
+                            c,
+                            s
+                        )
+                    ],
+
+                    dim=-1
+                )
+
+            ],
+
+            dim=-2
+
+        )
+
+
+    # ========================================================
+    # SINGLE QUBIT
     # ========================================================
 
     def _apply_single_qubit(
+
         self,
         state,
         gate,
         qubit
+
     ):
 
         batch = state.shape[0]
 
+
         tensor = state.reshape(
+
             batch,
-            *([2] * self.n_qubits)
+
+            *(
+                [2] *
+                self.n_qubits
+            )
+
         )
 
+
         tensor = tensor.movedim(
+
             qubit + 1,
+
             -1
+
         )
+
 
         tensor = torch.matmul(
+
             tensor,
-            gate.transpose(-1, -2)
+
+            gate.transpose(
+                -1,
+                -2
+            )
+
         )
+
 
         tensor = tensor.movedim(
+
             -1,
+
             qubit + 1
+
         )
 
+
         return tensor.reshape(
+
             batch,
+
             -1
+
         )
 
 
@@ -518,29 +715,60 @@ class SafeVQC(nn.Module):
     # ========================================================
 
     def _apply_cnot(
+
         self,
         state,
         control,
         target
+
     ):
 
         result = state.clone()
 
+
         dim = 2 ** self.n_qubits
+
 
         for i in range(dim):
 
-            if ((i >> control) & 1) == 1:
+            if (
+                (i >> control) & 1
+            ) == 1:
 
-                flipped = i ^ (1 << target)
+                flipped = (
+                    i ^
+                    (
+                        1 <<
+                        target
+                    )
+                )
+
 
                 if i < flipped:
 
-                    a = state[:, i].clone()
-                    b = state[:, flipped].clone()
+                    a = state[
+                        :,
+                        i
+                    ].clone()
 
-                    result[:, i] = b
-                    result[:, flipped] = a
+
+                    b = state[
+                        :,
+                        flipped
+                    ].clone()
+
+
+                    result[
+                        :,
+                        i
+                    ] = b
+
+
+                    result[
+                        :,
+                        flipped
+                    ] = a
+
 
         return result
 
@@ -549,16 +777,26 @@ class SafeVQC(nn.Module):
     # FORWARD
     # ========================================================
 
-    def forward(self, x):
+    def forward(
+        self,
+        x
+    ):
 
         batch = x.shape[0]
 
+
         state = torch.zeros(
+
             batch,
+
             2 ** self.n_qubits,
+
             dtype=torch.complex64,
+
             device=x.device
+
         )
+
 
         state[:, 0] = 1.0
 
@@ -567,12 +805,22 @@ class SafeVQC(nn.Module):
         # Angle embedding
         # ----------------------------------------------------
 
-        for q in range(self.n_qubits):
+        for q in range(
+            self.n_qubits
+        ):
 
-            state = self._apply_single_qubit(
-                state,
-                self.ry(x[:, q]),
-                q
+            state = (
+                self._apply_single_qubit(
+
+                    state,
+
+                    self.ry(
+                        x[:, q]
+                    ),
+
+                    q
+
+                )
             )
 
 
@@ -588,47 +836,70 @@ class SafeVQC(nn.Module):
                 self.n_qubits
             ):
 
-                state = self._apply_single_qubit(
-                    state,
+                state = (
+                    self._apply_single_qubit(
 
-                    self.ry(
-                        self.q_weights[
-                            layer,
-                            q,
-                            0
-                        ].expand(batch)
-                    ),
+                        state,
 
-                    q
-                )
+                        self.ry(
 
-                state = self._apply_single_qubit(
-                    state,
+                            self.q_weights[
+                                layer,
+                                q,
+                                0
+                            ].expand(
+                                batch
+                            )
 
-                    self.rz(
-                        self.q_weights[
-                            layer,
-                            q,
-                            1
-                        ].expand(batch)
-                    ),
+                        ),
 
-                    q
+                        q
+
+                    )
                 )
 
 
-            # ------------------------------------------------
+                state = (
+                    self._apply_single_qubit(
+
+                        state,
+
+                        self.rz(
+
+                            self.q_weights[
+                                layer,
+                                q,
+                                1
+                            ].expand(
+                                batch
+                            )
+
+                        ),
+
+                        q
+
+                    )
+                )
+
+
             # CNOT ring
-            # ------------------------------------------------
 
             for q in range(
                 self.n_qubits
             ):
 
-                state = self._apply_cnot(
-                    state,
-                    q,
-                    (q + 1) % self.n_qubits
+                state = (
+                    self._apply_cnot(
+
+                        state,
+
+                        q,
+
+                        (
+                            q + 1
+                        ) % self.n_qubits
+
+                    )
                 )
 
 
@@ -636,51 +907,71 @@ class SafeVQC(nn.Module):
         # Measurement
         # ----------------------------------------------------
 
-        probs = torch.abs(state) ** 2
+        probs = (
+            torch.abs(state) ** 2
+        )
+
 
         expectations = []
+
 
         for q in range(
             self.n_qubits
         ):
 
             values = torch.tensor(
+
                 [
+
                     1.0
-                    if ((i >> q) & 1) == 0
+
+                    if (
+                        (i >> q) & 1
+                    ) == 0
+
                     else -1.0
 
                     for i in range(
                         2 ** self.n_qubits
                     )
+
                 ],
+
                 device=x.device
+
             )
 
+
             expectations.append(
+
                 torch.sum(
+
                     probs * values,
+
                     dim=1
+
                 )
+
             )
 
 
         z = torch.stack(
+
             expectations,
+
             dim=1
+
         )
 
-        return self.classifier(z)
+
+        return self.classifier(
+            z
+        )
 
 
 # ============================================================
 # HYBRID MODEL
 # ============================================================
-
-print("\n" + "=" * 70)
-print("LOADING HYBRID B3 + 8-QUBIT VQC")
-print("=" * 70)
-
 
 class HybridModel(nn.Module):
 
@@ -688,10 +979,15 @@ class HybridModel(nn.Module):
 
         super().__init__()
 
+
         self.vqc = SafeVQC(
+
             n_qubits=8,
+
             n_layers=3
+
         )
+
 
         self.classical = nn.Sequential(
 
@@ -710,7 +1006,9 @@ class HybridModel(nn.Module):
                 16,
                 2
             )
+
         )
+
 
         self.fusion = nn.Sequential(
 
@@ -729,115 +1027,163 @@ class HybridModel(nn.Module):
                 16,
                 2
             )
+
         )
 
 
-    def forward(self, x):
+    def forward(
+        self,
+        x
+    ):
 
-        q_logits = self.vqc(x)
+        q_logits = self.vqc(
+            x
+        )
 
-        c_logits = self.classical(x)
+
+        c_logits = self.classical(
+            x
+        )
+
 
         fusion_input = torch.cat(
+
             [
                 q_logits,
                 c_logits
             ],
+
             dim=1
+
         )
+
 
         return self.fusion(
             fusion_input
         )
 
 
-hybrid = HybridModel()
+# ============================================================
+# LOAD HYBRID MODEL
+# ============================================================
 
+def load_hybrid():
 
-hybrid_checkpoint = torch.load(
-    os.path.join(
-        MODEL_DIR,
-        "hybrid_safe_vqc_FINAL.pth"
-    ),
-    map_location=device,
-    weights_only=False
-)
-
-
-if "model_state_dict" in hybrid_checkpoint:
-
-    hybrid.load_state_dict(
-        hybrid_checkpoint["model_state_dict"],
-        strict=True
-    )
-
-else:
-
-    hybrid.load_state_dict(
-        hybrid_checkpoint,
-        strict=True
+    print(
+        "Loading Hybrid B3 + 8-Qubit VQC..."
     )
 
 
-# Release checkpoint copy.
-
-del hybrid_checkpoint
-gc.collect()
+    hybrid = HybridModel()
 
 
-hybrid = hybrid.to(device)
-hybrid.eval()
+    checkpoint = torch.load(
 
-print("Hybrid B3 + 8-Qubit VQC loaded successfully.")
+        os.path.join(
+            MODEL_DIR,
+            "hybrid_safe_vqc_FINAL.pth"
+        ),
+
+        map_location=device,
+
+        weights_only=False
+    )
+
+
+    if "model_state_dict" in checkpoint:
+
+        hybrid.load_state_dict(
+
+            checkpoint[
+                "model_state_dict"
+            ],
+
+            strict=True
+
+        )
+
+    else:
+
+        hybrid.load_state_dict(
+
+            checkpoint,
+
+            strict=True
+
+        )
+
+
+    del checkpoint
+
+
+    hybrid = hybrid.to(
+        device
+    )
+
+    hybrid.eval()
+
+
+    cleanup_memory()
+
+
+    print(
+        "Hybrid B3 + 8-Qubit VQC loaded successfully."
+    )
+
+
+    return hybrid
 
 
 # ============================================================
 # IMAGE → 8D
 # ============================================================
 
-def image_to_8d(image):
+def image_to_8d(
+    image,
+    b3,
+    scaler,
+    projection
+):
 
-    image = image.convert("RGB")
+    image = image.convert(
+        "RGB"
+    )
+
 
     x = transform(
         image
-    ).unsqueeze(0).to(device)
+    ).unsqueeze(
+        0
+    ).to(
+        device
+    )
 
-
-    # --------------------------------------------------------
-    # EfficientNet-B3 feature extraction
-    # --------------------------------------------------------
 
     with torch.inference_mode():
 
-        features = b3(x)
+        features = b3(
+            x
+        )
 
 
-    # Convert B3 features to NumPy for sklearn scaler.
+    features_np = (
+        features
+        .cpu()
+        .numpy()
+    )
 
-    features_np = features.cpu().numpy()
-
-    # Release PyTorch feature tensor.
 
     del features
+    del x
 
-
-    # --------------------------------------------------------
-    # Standard scaling
-    # --------------------------------------------------------
 
     scaled_np = scaler.transform(
         features_np
     )
 
-    # Release NumPy B3 features.
 
     del features_np
 
-
-    # --------------------------------------------------------
-    # Convert back to PyTorch
-    # --------------------------------------------------------
 
     scaled = torch.from_numpy(
         scaled_np
@@ -846,14 +1192,9 @@ def image_to_8d(image):
         dtype=torch.float32
     )
 
-    # Release NumPy scaled array.
 
     del scaled_np
 
-
-    # --------------------------------------------------------
-    # 1536 → 128 → 32 → 8
-    # --------------------------------------------------------
 
     with torch.inference_mode():
 
@@ -861,17 +1202,15 @@ def image_to_8d(image):
             scaled
         )
 
-    # Release temporary tensor.
 
     del scaled
-    del x
 
 
     return features_8d
 
 
 # ============================================================
-# CLASSICAL MODEL PREDICTION
+# CLASSICAL PREDICTION
 # ============================================================
 
 def predict_classical_model(
@@ -882,42 +1221,75 @@ def predict_classical_model(
 
     x = transform(
         image
-    ).unsqueeze(0).to(device)
+    ).unsqueeze(
+        0
+    ).to(
+        device
+    )
 
 
     with torch.inference_mode():
 
-        logits = model(x)
+        logits = model(
+            x
+        )
+
 
         probabilities = torch.softmax(
+
             logits,
+
             dim=1
+
         )[0]
 
 
         benign_probability = float(
-            probabilities[0].item()
+
+            probabilities[
+                0
+            ].item()
+
         )
 
+
         malignant_probability = float(
-            probabilities[1].item()
+
+            probabilities[
+                1
+            ].item()
+
         )
 
 
         prediction = (
+
             "malignant"
+
             if malignant_probability >= 0.5
+
             else "benign"
+
         )
 
 
         logits_list = [
+
             float(v)
-            for v in logits[0].detach().cpu().tolist()
+
+            for v in (
+
+                logits[
+                    0
+                ]
+                .detach()
+                .cpu()
+                .tolist()
+
+            )
+
         ]
 
-
-    # Explicit cleanup.
 
     del probabilities
     del logits
@@ -932,12 +1304,17 @@ def predict_classical_model(
 
         "probabilities": {
 
-            "benign": benign_probability,
+            "benign":
+                benign_probability,
 
-            "malignant": malignant_probability
+            "malignant":
+                malignant_probability
+
         },
 
-        "logits": logits_list
+        "logits":
+            logits_list
+
     }
 
 
@@ -945,10 +1322,24 @@ def predict_classical_model(
 # HYBRID PREDICTION
 # ============================================================
 
-def predict_hybrid(image):
+def predict_hybrid(
+    image,
+    b3,
+    scaler,
+    projection,
+    hybrid
+):
 
     features_8d = image_to_8d(
-        image
+
+        image,
+
+        b3,
+
+        scaler,
+
+        projection
+
     )
 
 
@@ -958,25 +1349,42 @@ def predict_hybrid(image):
             features_8d
         )
 
+
         probabilities = F.softmax(
+
             logits,
+
             dim=1
+
         )[0]
 
 
         benign_probability = float(
-            probabilities[0].item()
+
+            probabilities[
+                0
+            ].item()
+
         )
 
+
         malignant_probability = float(
-            probabilities[1].item()
+
+            probabilities[
+                1
+            ].item()
+
         )
 
 
         prediction = (
+
             "malignant"
+
             if malignant_probability >= 0.5
+
             else "benign"
+
         )
 
 
@@ -994,20 +1402,40 @@ def predict_hybrid(image):
 
 
         logits_list = [
+
             float(v)
-            for v in logits[0].detach().cpu().tolist()
+
+            for v in (
+
+                logits[
+                    0
+                ]
+                .detach()
+                .cpu()
+                .tolist()
+
+            )
+
         ]
 
 
         quantum_features = [
+
             float(v)
-            for v in features_8d[
-                0
-            ].detach().cpu().numpy()
+
+            for v in (
+
+                features_8d[
+                    0
+                ]
+                .detach()
+                .cpu()
+                .numpy()
+
+            )
+
         ]
 
-
-    # Explicit cleanup.
 
     del probabilities
     del logits
@@ -1021,37 +1449,192 @@ def predict_hybrid(image):
             "8-Qubit VQC"
         ),
 
-        "prediction": prediction,
+        "prediction":
+            prediction,
 
-        "risk_level": risk_level,
+        "risk_level":
+            risk_level,
 
         "probabilities": {
 
-            "benign": benign_probability,
+            "benign":
+                benign_probability,
 
-            "malignant": malignant_probability
+            "malignant":
+                malignant_probability
+
         },
 
-        "logits": logits_list,
+        "logits":
+            logits_list,
 
-        "quantum_features": quantum_features
+        "quantum_features":
+            quantum_features
+
     }
+
+
+# ============================================================
+# COMPLETE PREDICTION PIPELINE
+# ============================================================
+
+def run_complete_prediction(
+    image
+):
+
+    # ========================================================
+    # MODEL 1: EFFICIENTNET-B0
+    # ========================================================
+
+    print(
+        "Starting EfficientNet-B0 inference..."
+    )
+
+
+    b0 = load_b0()
+
+
+    b0_result = predict_classical_model(
+
+        b0,
+
+        image,
+
+        "EfficientNet-B0"
+
+    )
+
+
+    # IMPORTANT:
+    # Completely remove B0 before loading ResNet.
+
+    del b0
+
+    cleanup_memory()
+
+
+    print(
+        "EfficientNet-B0 released from memory."
+    )
+
+
+    # ========================================================
+    # MODEL 2: RESNET-50
+    # ========================================================
+
+    print(
+        "Starting ResNet-50 inference..."
+    )
+
+
+    resnet = load_resnet()
+
+
+    resnet_result = predict_classical_model(
+
+        resnet,
+
+        image,
+
+        "ResNet-50"
+
+    )
+
+
+    # Release ResNet.
+
+    del resnet
+
+    cleanup_memory()
+
+
+    print(
+        "ResNet-50 released from memory."
+    )
+
+
+    # ========================================================
+    # MODEL 3: B3 + PROJECTION + VQC
+    # ========================================================
+
+    print(
+        "Starting Hybrid B3 + VQC inference..."
+    )
+
+
+    b3 = load_b3()
+
+
+    scaler = load_scaler()
+
+
+    projection = load_projection()
+
+
+    hybrid = load_hybrid()
+
+
+    hybrid_result = predict_hybrid(
+
+        image,
+
+        b3,
+
+        scaler,
+
+        projection,
+
+        hybrid
+
+    )
+
+
+    # ========================================================
+    # RELEASE ALL HYBRID MODELS
+    # ========================================================
+
+    del hybrid
+
+    del projection
+
+    del scaler
+
+    del b3
+
+    cleanup_memory()
+
+
+    print(
+        "Hybrid models released from memory."
+    )
+
+
+    return (
+        b0_result,
+        resnet_result,
+        hybrid_result
+    )
 
 
 # ============================================================
 # HEALTH
 # ============================================================
 
-@app.get("/api/health")
+@app.get(
+    "/api/health"
+)
 def health():
 
     return {
 
-        "status": "healthy",
+        "status":
+            "healthy",
 
-        "project": "PROJECT QUANTUM",
+        "project":
+            "PROJECT QUANTUM",
 
-        "problem": "SIH26139",
+        "problem":
+            "SIH26139",
 
         "models": [
 
@@ -1060,9 +1643,12 @@ def health():
             "ResNet-50",
 
             "EfficientNet-B3 + 8-Qubit VQC"
+
         ],
 
-        "device": str(device)
+        "device":
+            str(device)
+
     }
 
 
@@ -1070,7 +1656,9 @@ def health():
 # MODEL INFORMATION
 # ============================================================
 
-@app.get("/api/models")
+@app.get(
+    "/api/models"
+)
 def models():
 
     return {
@@ -1078,98 +1666,143 @@ def models():
         "models": [
 
             {
-                "id": "efficientnet_b0",
 
-                "name": "EfficientNet-B0",
+                "id":
+                    "efficientnet_b0",
 
-                "type": "Classical CNN",
+                "name":
+                    "EfficientNet-B0",
 
-                "validation_auc": B0_VAL_AUC,
+                "type":
+                    "Classical CNN",
 
-                "reported_accuracy": 0.7179,
+                "validation_auc":
+                    B0_VAL_AUC,
 
-                "reported_sensitivity": 0.7682,
+                "reported_accuracy":
+                    0.7179,
 
-                "reported_specificity": 0.6667,
+                "reported_sensitivity":
+                    0.7682,
 
-                "reported_f1": 0.7332,
+                "reported_specificity":
+                    0.6667,
 
-                "reported_roc_auc": 0.7663
+                "reported_f1":
+                    0.7332,
+
+                "reported_roc_auc":
+                    0.7663
+
             },
 
 
             {
-                "id": "resnet50",
 
-                "name": "ResNet-50",
+                "id":
+                    "resnet50",
 
-                "type": "Classical CNN",
+                "name":
+                    "ResNet-50",
 
-                "validation_auc": RESNET_VAL_AUC,
+                "type":
+                    "Classical CNN",
 
-                "reported_accuracy": 0.6514,
+                "validation_auc":
+                    RESNET_VAL_AUC,
 
-                "reported_sensitivity": 0.6318,
+                "reported_accuracy":
+                    0.6514,
 
-                "reported_specificity": 0.6713,
+                "reported_sensitivity":
+                    0.6318,
 
-                "reported_f1": 0.6465,
+                "reported_specificity":
+                    0.6713,
 
-                "reported_roc_auc": 0.7139
+                "reported_f1":
+                    0.6465,
+
+                "reported_roc_auc":
+                    0.7139
+
             },
 
 
             {
-                "id": "hybrid_vqc",
 
-                "name": (
-                    "EfficientNet-B3 + "
-                    "8-Qubit VQC"
-                ),
+                "id":
+                    "hybrid_vqc",
 
-                "type": (
-                    "Hybrid "
-                    "Quantum-Classical"
-                ),
+                "name":
+                    (
+                        "EfficientNet-B3 + "
+                        "8-Qubit VQC"
+                    ),
 
-                "qubits": 8,
+                "type":
+                    (
+                        "Hybrid "
+                        "Quantum-Classical"
+                    ),
 
-                "layers": 3,
+                "qubits":
+                    8,
 
-                "reported_accuracy": 0.7821,
+                "layers":
+                    3,
 
-                "reported_sensitivity": 0.7773,
+                "reported_accuracy":
+                    0.7821,
 
-                "reported_specificity": 0.7870,
+                "reported_sensitivity":
+                    0.7773,
 
-                "reported_f1": 0.7826,
+                "reported_specificity":
+                    0.7870,
 
-                "reported_roc_auc": 0.8420
+                "reported_f1":
+                    0.7826,
+
+                "reported_roc_auc":
+                    0.8420
+
             },
 
 
             {
-                "id": "yolo26n",
 
-                "name": "YOLO26n",
+                "id":
+                    "yolo26n",
 
-                "type": "Object Detection",
+                "name":
+                    "YOLO26n",
 
-                "reported_precision": 0.5000,
+                "type":
+                    "Object Detection",
 
-                "reported_recall": 1.0000,
+                "reported_precision":
+                    0.5000,
 
-                "reported_map50": 0.5351,
+                "reported_recall":
+                    1.0000,
 
-                "reported_map50_95": 0.5351,
+                "reported_map50":
+                    0.5351,
 
-                "note": (
-                    "YOLO26n checkpoint is not "
-                    "loaded by this API."
-                )
+                "reported_map50_95":
+                    0.5351,
+
+                "note":
+                    (
+                        "YOLO26n checkpoint is not "
+                        "loaded by this API."
+                    )
+
             }
 
         ]
+
     }
 
 
@@ -1177,205 +1810,72 @@ def models():
 # PREDICTION
 # ============================================================
 
-@app.post("/api/predict")
+@app.post(
+    "/api/predict"
+)
 async def predict(
+
     file: UploadFile = File(...)
+
 ):
 
     try:
 
         contents = await file.read()
 
+
         image = Image.open(
-            io.BytesIO(contents)
-        ).convert("RGB")
 
-
-        # ----------------------------------------------------
-        # IMPORTANT:
-        # Serialize the complete inference pipeline.
-        #
-        # This prevents multiple users/requests from loading
-        # temporary tensors into RAM at the same time.
-        # ----------------------------------------------------
-
-        with inference_lock:
-
-            # ------------------------------------------------
-            # Classical model 1
-            # ------------------------------------------------
-
-            b0_result = predict_classical_model(
-                b0,
-                image,
-                "EfficientNet-B0"
+            io.BytesIO(
+                contents
             )
 
-
-            # ------------------------------------------------
-            # Classical model 2
-            # ------------------------------------------------
-
-            resnet_result = predict_classical_model(
-                resnet,
-                image,
-                "ResNet-50"
-            )
-
-
-            # ------------------------------------------------
-            # Hybrid model
-            # ------------------------------------------------
-
-            hybrid_result = predict_hybrid(
-                image
-            )
-
-
-        # ----------------------------------------------------
-        # Explicit cleanup
-        # ----------------------------------------------------
-
-        del image
-        del contents
-
-        gc.collect()
-
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-
-
-        # ----------------------------------------------------
-        # Final response
-        # ----------------------------------------------------
-
-        return {
-
-            "success": True,
-
-            "filename": file.filename,
-
-            "models": {
-
-                "efficientnet_b0": b0_result,
-
-                "resnet50": resnet_result,
-
-                "hybrid_vqc": hybrid_result
-            },
-
-            "hybrid_result": {
-
-                "prediction": (
-                    hybrid_result[
-                        "prediction"
-                    ]
-                ),
-
-                "risk_level": (
-                    hybrid_result[
-                        "risk_level"
-                    ]
-                ),
-
-                "probabilities": (
-                    hybrid_result[
-                        "probabilities"
-                    ]
-                )
-            },
-
-            "quantum_features": (
-                hybrid_result[
-                    "quantum_features"
-                ]
-            ),
-
-            "disclaimer": (
-                "Research prototype for "
-                "decision support only. "
-                "Not a clinical diagnosis."
-            )
-        }
-
-
-    except Exception as e:
-
-        print(
-            "Prediction error:",
-            repr(e)
+        ).convert(
+            "RGB"
         )
 
-        gc.collect()
 
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-
-        return {
-
-            "success": False,
-
-            "error": str(e)
-        }
-
-
-# ============================================================
-# ASYNC PREDICTION JOB
-# ============================================================
-
-def _run_prediction_job(
-    job_id,
-    image_bytes
-):
-
-    try:
-
-        image = Image.open(
-            io.BytesIO(image_bytes)
-        ).convert("RGB")
-
-
-        # ----------------------------------------------------
-        # Serialize inference
-        # ----------------------------------------------------
+        # ====================================================
+        # ONLY ONE COMPLETE INFERENCE AT A TIME
+        # ====================================================
 
         with inference_lock:
 
-            b0_result = predict_classical_model(
-                b0,
-                image,
-                "EfficientNet-B0"
-            )
+            (
 
+                b0_result,
 
-            resnet_result = predict_classical_model(
-                resnet,
-                image,
-                "ResNet-50"
-            )
+                resnet_result,
 
+                hybrid_result
 
-            hybrid_result = predict_hybrid(
+            ) = run_complete_prediction(
                 image
             )
 
 
-        # ----------------------------------------------------
-        # Cleanup
-        # ----------------------------------------------------
+        # ====================================================
+        # CLEANUP REQUEST OBJECTS
+        # ====================================================
 
         del image
-        del image_bytes
 
-        gc.collect()
+        del contents
 
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
+        cleanup_memory()
 
 
-        result = {
+        # ====================================================
+        # FINAL RESPONSE
+        # ====================================================
 
-            "success": True,
+        return {
+
+            "success":
+                True,
+
+            "filename":
+                file.filename,
 
             "models": {
 
@@ -1387,6 +1887,131 @@ def _run_prediction_job(
 
                 "hybrid_vqc":
                     hybrid_result
+
+            },
+
+            "hybrid_result": {
+
+                "prediction":
+                    hybrid_result[
+                        "prediction"
+                    ],
+
+                "risk_level":
+                    hybrid_result[
+                        "risk_level"
+                    ],
+
+                "probabilities":
+                    hybrid_result[
+                        "probabilities"
+                    ]
+
+            },
+
+            "quantum_features":
+                hybrid_result[
+                    "quantum_features"
+                ],
+
+            "disclaimer": (
+                "Research prototype for "
+                "decision support only. "
+                "Not a clinical diagnosis."
+            )
+
+        }
+
+
+    except Exception as e:
+
+        print(
+            "Prediction error:",
+            repr(e)
+        )
+
+
+        cleanup_memory()
+
+
+        return {
+
+            "success":
+                False,
+
+            "error":
+                str(e)
+
+        }
+
+
+# ============================================================
+# ASYNC PREDICTION JOB
+# ============================================================
+
+def _run_prediction_job(
+
+    job_id,
+
+    image_bytes
+
+):
+
+    try:
+
+        image = Image.open(
+
+            io.BytesIO(
+                image_bytes
+            )
+
+        ).convert(
+            "RGB"
+        )
+
+
+        # ====================================================
+        # RUN COMPLETE PIPELINE
+        # ====================================================
+
+        with inference_lock:
+
+            (
+
+                b0_result,
+
+                resnet_result,
+
+                hybrid_result
+
+            ) = run_complete_prediction(
+                image
+            )
+
+
+        del image
+
+        del image_bytes
+
+        cleanup_memory()
+
+
+        result = {
+
+            "success":
+                True,
+
+            "models": {
+
+                "efficientnet_b0":
+                    b0_result,
+
+                "resnet50":
+                    resnet_result,
+
+                "hybrid_vqc":
+                    hybrid_result
+
             },
 
             "disclaimer": (
@@ -1394,16 +2019,22 @@ def _run_prediction_job(
                 "decision support only. "
                 "Not a clinical diagnosis."
             )
+
         }
 
 
         with prediction_lock:
 
-            prediction_jobs[job_id] = {
+            prediction_jobs[
+                job_id
+            ] = {
 
-                "status": "completed",
+                "status":
+                    "completed",
 
-                "result": result
+                "result":
+                    result
+
             }
 
 
@@ -1414,19 +2045,22 @@ def _run_prediction_job(
             repr(e)
         )
 
-        gc.collect()
 
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
+        cleanup_memory()
 
 
         with prediction_lock:
 
-            prediction_jobs[job_id] = {
+            prediction_jobs[
+                job_id
+            ] = {
 
-                "status": "failed",
+                "status":
+                    "failed",
 
-                "error": str(e)
+                "error":
+                    str(e)
+
             }
 
 
@@ -1434,13 +2068,19 @@ def _run_prediction_job(
 # ASYNC ENDPOINT
 # ============================================================
 
-@app.post("/api/predict-async")
+@app.post(
+    "/api/predict-async"
+)
 async def predict_async(
+
     file: UploadFile = File(...),
+
     background_tasks: BackgroundTasks = None
+
 ):
 
     image_bytes = await file.read()
+
 
     job_id = str(
         uuid.uuid4()
@@ -1449,26 +2089,38 @@ async def predict_async(
 
     with prediction_lock:
 
-        prediction_jobs[job_id] = {
+        prediction_jobs[
+            job_id
+        ] = {
 
-            "status": "processing"
+            "status":
+                "processing"
+
         }
 
 
     background_tasks.add_task(
+
         _run_prediction_job,
+
         job_id,
+
         image_bytes
+
     )
 
 
     return {
 
-        "success": True,
+        "success":
+            True,
 
-        "job_id": job_id,
+        "job_id":
+            job_id,
 
-        "status": "processing"
+        "status":
+            "processing"
+
     }
 
 
@@ -1480,7 +2132,9 @@ async def predict_async(
     "/api/predict-status/{job_id}"
 )
 async def predict_status(
+
     job_id: str
+
 ):
 
     with prediction_lock:
@@ -1494,17 +2148,23 @@ async def predict_status(
 
         return {
 
-            "success": False,
+            "success":
+                False,
 
-            "status": "not_found"
+            "status":
+                "not_found"
+
         }
 
 
     return {
 
-        "success": True,
+        "success":
+            True,
 
-        "job_id": job_id,
+        "job_id":
+            job_id,
 
         **job
+
     }
